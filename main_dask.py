@@ -1,13 +1,12 @@
 import os
+import xgboost.dask
 from dask.distributed import Client
 import numpy as np
 import pandas as pd
 import dask.dataframe as dd
-from xgboost import XGBRegressor
-from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
-from sklearn.metrics import accuracy_score
-import matplotlib.pyplot as plt
-from sklearn.metrics import mean_squared_error
+from xgboost.dask import DaskXGBRegressor
+from dask_ml.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
 
 
 def separate_date(df: dd.DataFrame) -> dd.DataFrame:
@@ -18,8 +17,7 @@ def separate_date(df: dd.DataFrame) -> dd.DataFrame:
 
     df = df.drop('tpep_pickup_datetime', axis=1)
 
-    df = df[['PULocationID', 'year', 'month', 'day', 'PRCP', 'SNOW', 'SNWD', 'TMAX', 'TMIN', 'DAPR', 'MDPR', 'TOBS',
-             'WESD', 'WESF', 'WT01', 'WT03', 'WT04', 'WT05', 'WT06', 'WT11']]
+    df = df[['PULocationID', 'year', 'month', 'day', 'PRCP', 'SNOW', 'TMAX', 'TMIN', 'TOBS']]
 
     return df
 
@@ -30,20 +28,9 @@ def add_number_of_cars(df: dd.DataFrame) -> dd.DataFrame:
         'PULocationID': 'count',
         'PRCP': 'mean',
         'SNOW': 'mean',
-        'SNWD': 'mean',
         'TMAX': 'mean',
         'TMIN': 'mean',
-        'DAPR': 'mean',
-        'MDPR': 'mean',
         'TOBS': 'mean',
-        'WESD': 'mean',
-        'WESF': 'mean',
-        'WT01': 'mean',
-        'WT03': 'mean',
-        'WT04': 'mean',
-        'WT05': 'mean',
-        'WT06': 'mean',
-        'WT11': 'mean'
     })
 
     df_grouped = df_grouped.rename(columns={'PULocationID': 'number_of_cars'}).reset_index()
@@ -61,7 +48,8 @@ def load_data() -> dd.DataFrame:
     to_remove = ['Vendor_Name', 'tpep_dropoff_datetime', 'passenger_count', 'trip_distance',
                  'Start_Lon', 'Start_Lat', 'RatecodeID', 'store_and_fwd_flag', 'End_Lon', 'End_Lat',
                  'payment_type', 'fare_amount', 'extra', 'mta_tax', 'tip_amount', 'tolls_amount',
-                 'improvement_surcharge', 'total_amount', 'congestion_surcharge', 'airport_fee']
+                 'improvement_surcharge', 'total_amount', 'congestion_surcharge', 'airport_fee', 'SNWD', 'DAPR', 'MDPR',
+                 'WESD', 'WESF', 'WT01', 'WT03', 'WT04', 'WT05', 'WT06', 'WT11']
 
     df_dask = df_dask.drop(columns=to_remove)
 
@@ -71,55 +59,42 @@ def load_data() -> dd.DataFrame:
 
     df_dask = df_dask.drop_duplicates().reset_index(drop=True)
 
-    # df_dask = df_dask.sort_values(['PULocationID', 'year', 'month', 'day']).reset_index(drop=True)
-
     return df_dask
 
-def main():
-    # client = Client(os.environ['SCHEDULER_ADDRESS'])
+
+if __name__ == '__main__':
+    client = Client(os.environ['SCHEDULER_ADDRESS'])
     pd.set_option('display.max_rows', None)
     pd.set_option('display.max_columns', None)
     pd.set_option('display.width', None)
 
-    df = load_data().compute()
+    df = load_data()
+    result = pd.DataFrame(columns=['PULocationID', 'number_of_cars', 'rmse', 'r2'])
 
-    PULocationID = df.groupby('PULocationID')['year'].count().argmax()
+    for id in range(1, 265):
+        X = df[df['PULocationID'] == id].drop(columns=['PULocationID', 'number_of_cars'])
+        y = df[df['PULocationID'] == id]['number_of_cars']
 
-    X = df[ df['PULocationID'] == PULocationID ].drop(columns=['PULocationID', 'number_of_cars'])
-    y = df[ df['PULocationID'] == PULocationID ]['number_of_cars']
+        seed = 2
+        test_size = 0.3
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=seed,
+                                                            shuffle=True)
 
-    seed = 2
-    test_size = 0.2
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=seed)
+        model = DaskXGBRegressor(n_estimators=200)
+        model.client = client
+        model.fit(X_train, y_train)
 
-    print(X_train.columns)
+        y_pred = model.predict(X_test)
 
-    accuracy_scores = []
-    n_estimators_values = range(1, 1001, 10)
-
-    for n_estimators in n_estimators_values[-2:]:
-        model = XGBRegressor(n_estimators=n_estimators)
-        model.fit(X_train,
-                  y_train,
-                  eval_set=[(X_test, y_test)],
-                  verbose=True)
-
-        y_pred = model.predict(X_train)
-
-        mse = mean_squared_error(y_train, y_pred)
+        mse = mean_squared_error(y_test, y_pred)
 
         rmse = np.sqrt(mse)
+        r2 = r2_score(y_test, y_pred)
 
-        accuracy_scores.append(rmse)
+        result.loc[len(result.index)] = [id, y.sum().compute(), rmse, r2]
+        result['PULocationID'] = result['PULocationID'].astype(int)
+        result['number_of_cars'] = result['number_of_cars'].astype(int)
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(n_estimators_values, accuracy_scores, marker='o', linestyle='-')
-    plt.title('Accuracy Score vs. n_estimators')
-    plt.xlabel('n_estimators')
-    plt.ylabel('Accuracy Score')
-    plt.grid(True)
-    plt.show()
+    print(result)
 
-    # client.shutdown()
-if __name__ == '__main__':
-    main()
+    client.shutdown()
