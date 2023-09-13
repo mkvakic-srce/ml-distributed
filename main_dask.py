@@ -1,6 +1,5 @@
 import os
-import xgboost.dask
-from dask.distributed import Client
+from dask.distributed import Client, LocalCluster
 import numpy as np
 import pandas as pd
 import dask.dataframe as dd
@@ -41,7 +40,7 @@ def add_number_of_cars(df: dd.DataFrame) -> dd.DataFrame:
 
 
 def load_data() -> dd.DataFrame:
-    folder_path = "output/"
+    folder_path = "test/"
 
     df_dask = dd.read_parquet(folder_path)
 
@@ -58,6 +57,7 @@ def load_data() -> dd.DataFrame:
     df_dask = add_number_of_cars(df_dask)
 
     df_dask = df_dask.drop_duplicates().reset_index(drop=True)
+    # df_dask = df_dask.sort_values(['PULocationID', 'year', 'month', 'day']).reset_index(drop=True)
 
     return df_dask
 
@@ -75,25 +75,27 @@ if __name__ == '__main__':
         X = df[df['PULocationID'] == id].drop(columns=['PULocationID', 'number_of_cars'])
         y = df[df['PULocationID'] == id]['number_of_cars']
 
-        seed = 2
-        test_size = 0.3
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=seed,
-                                                            shuffle=True)
+        size = len(X.index)
 
-        model = DaskXGBRegressor(n_estimators=200)
-        model.client = client
-        model.fit(X_train, y_train)
+        if size > 4:
+            seed = 2
+            test_size = 0.3
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=seed,
+                                                                shuffle=False)
 
-        y_pred = model.predict(X_test)
+            model = DaskXGBRegressor(n_estimators=500)
+            model.client = client
+            model.fit(X_train, y_train)
 
-        mse = mean_squared_error(y_test, y_pred)
+            y_pred = model.predict(X_test)
 
-        rmse = np.sqrt(mse)
-        r2 = r2_score(y_test, y_pred)
+            rmse = mean_squared_error(y_test, y_pred, squared=False)
 
-        result.loc[len(result.index)] = [id, y.sum().compute(), rmse, r2]
-        result['PULocationID'] = result['PULocationID'].astype(int)
-        result['number_of_cars'] = result['number_of_cars'].astype(int)
+            r2 = r2_score(y_test, y_pred)
+
+            result.loc[len(result.index)] = [id, y.sum().compute(), rmse, r2]
+            result['PULocationID'] = result['PULocationID'].astype(int)
+            result['number_of_cars'] = result['number_of_cars'].astype(int)
 
     print(result)
 
